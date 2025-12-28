@@ -3653,6 +3653,7 @@ class StudioGUI(ctk.CTk):
         self.vieneu_standard_fallback = None
         self.vieneu_fallback_lock = threading.Lock()
         self._vieneu_fallback_cls = None
+        self.vieneu_voice_lock = threading.Lock()
 
         # Background loading + current config metadata
         self.vieneu_loading_thread = None
@@ -4099,6 +4100,13 @@ class StudioGUI(ctk.CTk):
                 return fallback.infer(text, ref_codes, ref_text)
             raise
 
+    def _vieneu_apply_fallback_stream(self, message: str, chunk_text: str, ref_codes, ref_text: str, target_list: list):
+        """Log message and append fallback audio into target_list."""
+        self.after(0, lambda m=message: self._vieneu_log(m))
+        wav = self._vieneu_safe_infer(chunk_text, ref_codes, ref_text)
+        if wav is not None and len(wav) > 0:
+            target_list[:] = [wav]
+
     @classmethod
     def _sanitize_error_message(cls, message: str) -> str:
         """Hide external links and paths from error output."""
@@ -4163,7 +4171,8 @@ class StudioGUI(ctk.CTk):
             }
 
             # Update or add voice entry
-            VIENEU_VOICE_SAMPLES[voice_name] = voice_entry
+            with self.vieneu_voice_lock:
+                VIENEU_VOICE_SAMPLES[voice_name] = voice_entry
 
     def _vieneu_populate_voice_list(self):
         """Populate the voice list based on selected backbone"""
@@ -4174,7 +4183,10 @@ class StudioGUI(ctk.CTk):
         
         backbone = self.vieneu_backbone_var.get()
 
-        valid_voices = [v for v in VIENEU_VOICE_SAMPLES.keys() if self._vieneu_voice_files_exist(v)]
+        with self.vieneu_voice_lock:
+            voice_valid_map = {v: self._vieneu_voice_files_exist(v) for v in VIENEU_VOICE_SAMPLES.keys()}
+
+        valid_voices = [v for v, ok in voice_valid_map.items() if ok]
         available_custom = [v for v in valid_voices if v not in VIENEU_GGUF_ALLOWED_VOICES]
 
         # GGUF models: keep default allowed voices, but still show any valid custom clones
@@ -4586,13 +4598,14 @@ class StudioGUI(ctk.CTk):
                 torch.save(ref_codes, codes_dest)
                 
                 # Add to VIENEU_VOICE_SAMPLES dictionary (runtime)
-                VIENEU_VOICE_SAMPLES[voice_name] = {
-                    "audio": audio_dest,
-                    "text": text_dest,
-                    "codes": codes_dest,
-                    "gender": "Custom",
-                    "accent": "Custom"
-                }
+                with self.vieneu_voice_lock:
+                    VIENEU_VOICE_SAMPLES[voice_name] = {
+                        "audio": audio_dest,
+                        "text": text_dest,
+                        "codes": codes_dest,
+                        "gender": "Custom",
+                        "accent": "Custom"
+                    }
                 
                 self.after(0, lambda: self._vieneu_log(f"✅ Đã lưu giọng '{voice_name}' thành công!"))
                 self.after(0, lambda: self._vieneu_log(f"📁 Vị trí: {sample_dir}"))
@@ -4708,12 +4721,6 @@ class StudioGUI(ctk.CTk):
                         
                         chunk_audio = []
 
-                        def _fallback_stream(msg: str):
-                            self.after(0, lambda m=msg: self._vieneu_log(m))
-                            wav = self._vieneu_safe_infer(chunk_text, ref_codes, ref_text)
-                            if wav is not None and len(wav) > 0:
-                                chunk_audio[:] = [wav]
-
                         try:
                             # Check if infer_stream method exists before calling
                             if not hasattr(self.vieneu_tts_instance, 'infer_stream'):
@@ -4724,12 +4731,30 @@ class StudioGUI(ctk.CTk):
                                     chunk_audio.append(audio_chunk)
                         except (AttributeError, NotImplementedError) as stream_err:
                             # Log appropriate message based on error type
-                            _fallback_stream(f"⚠️ Streaming không khả dụng, dùng chế độ thường: {stream_err}")
+                            self._vieneu_apply_fallback_stream(
+                                f"⚠️ Streaming không khả dụng, dùng chế độ thường: {stream_err}",
+                                chunk_text,
+                                ref_codes,
+                                ref_text,
+                                chunk_audio
+                            )
                         except Exception as stream_err:
                             if VIENEU_NO_TOKEN_ERR in str(stream_err) and self.vieneu_using_fast:
-                                _fallback_stream(f"⚠️ LMDeploy trả về token không hợp lệ, chuyển backend chuẩn: {stream_err}")
+                                self._vieneu_apply_fallback_stream(
+                                    f"⚠️ LMDeploy trả về token không hợp lệ, chuyển backend chuẩn: {stream_err}",
+                                    chunk_text,
+                                    ref_codes,
+                                    ref_text,
+                                    chunk_audio
+                                )
                             else:
-                                _fallback_stream(f"⚠️ Streaming lỗi, thử non-streaming: {stream_err}")
+                                self._vieneu_apply_fallback_stream(
+                                    f"⚠️ Streaming lỗi, thử non-streaming: {stream_err}",
+                                    chunk_text,
+                                    ref_codes,
+                                    ref_text,
+                                    chunk_audio
+                                )
                         
                         # Filter out empty arrays and concatenate
                         chunk_audio = [arr for arr in chunk_audio if arr is not None and len(arr) > 0]
