@@ -7,6 +7,7 @@ import threading
 import tkinter as tk  
 from tkinter import filedialog, messagebox
 import customtkinter as ctk 
+import ttkbootstrap as tb
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
@@ -415,6 +416,18 @@ MIN_AUDIO_FILE_SIZE = 100  # Minimum bytes for a valid audio file
 
 # Error message display
 ERROR_MSG_MAX_LENGTH = 50  # Maximum characters to display in error messages
+
+# Emoji/icon stripping pattern for button cleanup
+EMOJI_PATTERN = re.compile(
+    r'[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U00002190-\U000021FF\U0000FE00-\U0000FE0F]'
+)
+LOG_TEXT_COLOR = "#e5e7eb"
+LOG_BG_COLOR = "#0f172a"
+LOG_ALT_BG_COLOR = "#0b1220"
+LOG_FONT_FAMILY = "JetBrains Mono"
+BUTTON_FALLBACK_TEXT = "Thao tác"
+DEFAULT_UI_THEME = "flatly"
+INFO_TEXT_COLOR = "#94a3b8"
 
 
 # =============================================================================
@@ -2476,6 +2489,38 @@ class LongTextProcessor:
 # GUI APPLICATION
 # =============================================================================
 
+class BootstrapTabView(tb.Notebook):
+    """
+    Thin wrapper around ttkbootstrap.Notebook to provide a simpler API
+    compatible with the previous CTkTabview usage.
+
+    Methods:
+        add(name): create a new tab frame (ttkbootstrap.Frame) and return it.
+        set(name): switch to the tab identified by name.
+        tab_frames(): return a mapping of tab names to their frames.
+    """
+    def __init__(self, master=None, theme=DEFAULT_UI_THEME, *args, **kwargs):
+        # Keep a reference to the style so the theme stays applied for the notebook lifetime
+        self.style = tb.Style(master=master, theme=theme)
+        super().__init__(master, *args, bootstyle="dark", padding=5, **kwargs)
+        self._tabs: Dict[str, tb.Frame] = {}
+
+    def add(self, name: str):
+        frame = tb.Frame(self)
+        super().add(frame, text=name)
+        self._tabs[name] = frame
+        return frame
+
+    def set(self, name: str):
+        target = self._tabs.get(name)
+        if not target:
+            raise KeyError(f"Tab '{name}' does not exist. Available tabs: {list(self._tabs.keys())}")
+        self.select(target)
+
+    def tab_frames(self) -> Dict[str, tb.Frame]:
+        return self._tabs.copy()
+
+
 class StudioGUI(ctk.CTk):
     SANITIZED_ERROR_FALLBACK = os.getenv("VN_TTS_ERROR_FALLBACK", "Đã xảy ra lỗi không xác định")
     SANITIZE_URL_PATTERN = re.compile(r"(https?://\S+|github\.com/\S*)")
@@ -2573,18 +2618,18 @@ class StudioGUI(ctk.CTk):
 
     def _setup_ui(self):
         # Main Tabview
-        self.tabview = ctk.CTkTabview(self, width=1380, height=880)
+        self.tabview = BootstrapTabView(self, theme=DEFAULT_UI_THEME)
         self.tabview.pack(fill="both", expand=True, padx=10, pady=10)
 
         # Create Tabs
         self.tab_dashboard = self.tabview.add("Gemini TTS")
-        self.tab_longtext = self.tabview.add("Long Text Engine")
-        self.tab_multivoice = self.tabview.add("Multi Voice (Đa giọng)")
+        self.tab_longtext = self.tabview.add("Long Text")
+        self.tab_multivoice = self.tabview.add("Multi Voice")
         self.tab_capcut = self.tabview.add("Capcut Voice")
         self.tab_edge = self.tabview.add("Edge TTS")
-        self.tab_vieneu = self.tabview.add("🇻🇳 VN TTS")
+        self.tab_vieneu = self.tabview.add("VN TTS")
         self.tab_script = self.tabview.add("Đọc Kịch Bản")
-        self.tab_settings = self.tabview.add("⚙Configuration")
+        self.tab_settings = self.tabview.add("Configuration")
 
         # Setup Content
         self._setup_settings_tab()
@@ -2595,6 +2640,8 @@ class StudioGUI(ctk.CTk):
         self._setup_edge_tab()
         self._setup_vieneu_tab()
         self._setup_script_tab()
+        self._sanitize_button_texts()
+        self._standardize_logs()
         
         # Bind optimized paste handlers to all text inputs to prevent UI lag
         self._bind_optimized_paste_handlers()
@@ -2689,6 +2736,70 @@ class StudioGUI(ctk.CTk):
             # Log error using the log method for consistency
             self.log(f"Paste error: {e}", "WARNING")
             return None  # Fall back to default paste
+
+    def _sanitize_button_texts(self):
+        """Remove emoji icons from buttons and replace with plain labels."""
+        icon_map = {
+            "▶": "Phát",
+            "⏹": "Dừng",
+            "🔧": "Thực hiện",
+            "💾": "Lưu",
+            "📂": "Chọn",
+            "📝": "Nhập",
+            "🎙️": "Tạo",
+            "🚀": "Chạy",
+            "⚙️": "Cấu hình",
+            "📁": "Thư mục",
+            "📄": "Tệp",
+        }
+        translation = str.maketrans(icon_map)
+
+        def clean_text(text: str) -> str:
+            if not text:
+                return BUTTON_FALLBACK_TEXT
+            cleaned = text.translate(translation)
+            cleaned = EMOJI_PATTERN.sub("", cleaned).strip()
+            return cleaned or BUTTON_FALLBACK_TEXT
+
+        def walk(widget):
+            try:
+                if isinstance(widget, (ctk.CTkButton, tk.Button)):
+                    raw = widget.cget("text")
+                    updated = clean_text(raw)
+                    if updated != raw:
+                        widget.configure(text=updated)
+            except (tk.TclError, AttributeError):
+                pass
+            for child in widget.winfo_children():
+                walk(child)
+
+        walk(self)
+
+    def _standardize_logs(self):
+        """Apply consistent styling to all log text areas for readability."""
+        log_widgets = [
+            getattr(self, "txt_log", None),
+            getattr(self, "lt_txt_log", None),
+            getattr(self, "edge_log", None),
+            getattr(self, "capcut_log", None),
+            getattr(self, "vieneu_log", None),
+        ]
+        for widget in log_widgets:
+            if widget:
+                if isinstance(widget, ctk.CTkTextbox):
+                    try:
+                        widget.configure(font=(LOG_FONT_FAMILY, 11),
+                                         text_color=LOG_TEXT_COLOR,
+                                         fg_color=LOG_BG_COLOR)
+                    except (tk.TclError, AttributeError):
+                        pass
+                else:
+                    try:
+                        widget.configure(font=(LOG_FONT_FAMILY, 11),
+                                         foreground=LOG_TEXT_COLOR,
+                                         background=LOG_ALT_BG_COLOR)
+                    except (tk.TclError, AttributeError):
+                        pass
 
     # ==========================================================================
     # TAB: SETTINGS (CẤU HÌNH) - Restructured
@@ -3186,7 +3297,7 @@ class StudioGUI(ctk.CTk):
         settings_frame = ctk.CTkFrame(tab, fg_color="#1e1e1e", corner_radius=0)
         settings_frame.grid(row=0, column=2, sticky="nsew", padx=(2, 0), pady=0)
 
-        ctk.CTkLabel(settings_frame, text="⚙️ Cài đặt giọng đọc", font=("Roboto", 14, "bold")).pack(anchor="w", padx=15, pady=(15, 10))
+        ctk.CTkLabel(settings_frame, text="Cài đặt giọng đọc", font=("Roboto", 14, "bold")).pack(anchor="w", padx=15, pady=(15, 10))
 
         # Scrollable Settings
         setting_scroll = ctk.CTkScrollableFrame(settings_frame, fg_color="transparent")
@@ -3661,8 +3772,17 @@ class StudioGUI(ctk.CTk):
         content_scroll = ctk.CTkScrollableFrame(left_frame, fg_color="transparent")
         content_scroll.pack(fill="both", expand=True, padx=5, pady=5)
 
+        ctk.CTkLabel(
+            content_scroll,
+            text=f"Thư mục VieNeu-TTS: {VIENEU_TTS_DIR}",
+            font=("Roboto", 10),
+            text_color=INFO_TEXT_COLOR,
+            wraplength=260,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(5, 5))
+
         # ===== MODEL CONFIGURATION SECTION =====
-        ctk.CTkLabel(content_scroll, text="⚙️ CẤU HÌNH MODEL", font=("Roboto", 12, "bold"), text_color="#818cf8").pack(anchor="w", padx=10, pady=(10, 5))
+        ctk.CTkLabel(content_scroll, text="CẤU HÌNH MODEL", font=("Roboto", 12, "bold"), text_color="#818cf8").pack(anchor="w", padx=10, pady=(10, 5))
         
         model_frame = ctk.CTkFrame(content_scroll, fg_color="#1f2937")
         model_frame.pack(fill="x", padx=10, pady=5)
@@ -5411,13 +5531,13 @@ class StudioGUI(ctk.CTk):
             session_id = self.entry_capcut_session.get().strip() if hasattr(self, 'entry_capcut_session') else self.capcut_session_id
             if not session_id:
                 messagebox.showerror("Lỗi", "Vui lòng nhập Capcut Session ID trong tab Cài đặt!")
-                self.tabview.set("⚙️ Configuration")
+                self.tabview.set("Configuration")
                 return
         elif engine == "google":
             api_keys = self._get_api_keys()
             if not api_keys:
                 messagebox.showerror("Lỗi", "Vui lòng nhập API key trong tab Cài đặt!")
-                self.tabview.set("⚙️ Configuration")
+                self.tabview.set("Configuration")
                 return
         
         # Start processing
@@ -5449,13 +5569,13 @@ class StudioGUI(ctk.CTk):
             session_id = self.entry_capcut_session.get().strip() if hasattr(self, 'entry_capcut_session') else self.capcut_session_id
             if not session_id:
                 messagebox.showerror("Lỗi", "Vui lòng nhập Capcut Session ID trong tab Cài đặt!")
-                self.tabview.set("⚙️ Configuration")
+                self.tabview.set("Configuration")
                 return
         elif engine == "google":
             api_keys = self._get_api_keys()
             if not api_keys:
                 messagebox.showerror("Lỗi", "Vui lòng nhập API key trong tab Cài đặt!")
-                self.tabview.set("⚙️ Configuration")
+                self.tabview.set("Configuration")
                 return
         
         # Start processing
@@ -6060,7 +6180,7 @@ class StudioGUI(ctk.CTk):
         
         if not session_id:
             messagebox.showerror("Lỗi", "Vui lòng nhập Session ID trong tab Cài đặt!")
-            self.tabview.set("⚙️ Configuration")
+            self.tabview.set("Configuration")
             return
         
         raw_text = self.capcut_text_input.get("1.0", "end").strip()
@@ -6295,7 +6415,7 @@ class StudioGUI(ctk.CTk):
         
         if not session_id:
             messagebox.showerror("Lỗi", "Vui lòng nhập Session ID trong tab Cài đặt!")
-            self.tabview.set("⚙️ Configuration")
+            self.tabview.set("Configuration")
             return
         
         if not input_path or not os.path.exists(input_path):
@@ -7569,7 +7689,7 @@ class StudioGUI(ctk.CTk):
         api_keys = self._get_api_keys()
         if not api_keys:
             messagebox.showerror("Error", "Thiếu API key")
-            self.tabview.set("⚙️ Configuration")
+            self.tabview.set("Configuration")
             return
         
         if not self.subtitles:

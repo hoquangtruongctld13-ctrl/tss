@@ -31,6 +31,7 @@ dependencies = [
     "lmdeploy",
     "triton-windows; sys_platform == 'win32'",
     "triton; sys_platform != 'win32'",
+    "ttkbootstrap>=1.10.1",
 ]
 
 [tool.uv.sources]
