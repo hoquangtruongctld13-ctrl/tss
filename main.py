@@ -365,6 +365,7 @@ VIENEU_GGUF_ALLOWED_VOICES = [
 VIENEU_MAX_CHARS_PER_CHUNK = 256
 VIENEU_DEFAULT_DEVICE = "Auto"  # Auto, CPU, CUDA
 VIENEU_SAMPLE_RATE = 24000
+VIENEU_NO_TOKEN_ERR = "No valid speech tokens"
 
 # Enhanced Retry settings
 MAX_RETRIES = 5  # Tăng số lần retry
@@ -3648,6 +3649,19 @@ class StudioGUI(ctk.CTk):
         self.vieneu_custom_ref_audio = None
         self.vieneu_custom_ref_text = ""
 
+        # Fallback backend cache/state
+        self.vieneu_standard_fallback = None
+        self.vieneu_fallback_lock = threading.Lock()
+        self._vieneu_fallback_cls = None
+        self.vieneu_voice_lock = threading.Lock()
+
+        # Background loading + current config metadata
+        self.vieneu_loading_thread = None
+        self.vieneu_backbone_repo = None
+        self.vieneu_codec_repo = None
+        self.vieneu_backbone_device = None
+        self.vieneu_codec_device = None
+
         # --- LEFT: Model & Voice Selection ---
         left_frame = ctk.CTkFrame(tab, fg_color="#0d1117")
         left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5), pady=0)
@@ -4049,6 +4063,50 @@ class StudioGUI(ctk.CTk):
             self._vieneu_log(message)
         self.after(0, _apply)
 
+    def _vieneu_get_fallback_tts(self):
+        """Lazily create a standard backend for fallback when LMDeploy fails."""
+        if self._vieneu_fallback_cls is None:
+            from vieneu_tts import VieNeuTTS
+            self._vieneu_fallback_cls = VieNeuTTS
+
+        with self.vieneu_fallback_lock:
+            if self.vieneu_standard_fallback is not None:
+                return self.vieneu_standard_fallback
+
+            VieNeuTTSCls = self._vieneu_fallback_cls
+
+            backbone_repo = self.vieneu_backbone_repo or "pnnbao-ump/VieNeu-TTS-q4-gguf"
+            codec_repo = self.vieneu_codec_repo or "neuphonic/neucodec"
+            backbone_device = (self.vieneu_backbone_device or "cpu")
+            codec_device = (self.vieneu_codec_device or "cpu")
+
+            self.after(0, lambda: self._vieneu_log("🔁 Đang chuyển sang backend chuẩn để tiếp tục sinh giọng..."))
+            self.vieneu_standard_fallback = VieNeuTTSCls(
+                backbone_repo=backbone_repo,
+                backbone_device=backbone_device,
+                codec_repo=codec_repo,
+                codec_device=codec_device
+            )
+            return self.vieneu_standard_fallback
+
+    def _vieneu_safe_infer(self, text: str, ref_codes, ref_text: str):
+        """Run inference with fallback when LMDeploy returns invalid tokens."""
+        try:
+            return self.vieneu_tts_instance.infer(text, ref_codes, ref_text)
+        except ValueError as ve:
+            if VIENEU_NO_TOKEN_ERR in str(ve) and self.vieneu_using_fast:
+                self.after(0, lambda: self._vieneu_log("⚠️ LMDeploy không sinh token hợp lệ, chuyển sang backend chuẩn..."))
+                fallback = self._vieneu_get_fallback_tts()
+                return fallback.infer(text, ref_codes, ref_text)
+            raise
+
+    def _vieneu_apply_fallback_stream(self, message: str, chunk_text: str, ref_codes, ref_text: str, target_list: list):
+        """Log message and append fallback audio into target_list."""
+        self.after(0, lambda: self._vieneu_log(message))
+        wav = self._vieneu_safe_infer(chunk_text, ref_codes, ref_text)
+        if wav is not None and len(wav) > 0:
+            target_list[:] = [wav]
+
     @classmethod
     def _sanitize_error_message(cls, message: str) -> str:
         """Hide external links and paths from error output."""
@@ -4082,19 +4140,66 @@ class StudioGUI(ctk.CTk):
                 except Exception:
                     pass  # Ignore if not packed
 
+    def _vieneu_voice_files_exist(self, voice_name: str) -> bool:
+        """Check if all required files for a voice are available on disk."""
+        voice_info = VIENEU_VOICE_SAMPLES.get(voice_name, {})
+        audio_path = voice_info.get("audio", "")
+        text_path = voice_info.get("text", "")
+        codes_path = voice_info.get("codes", "")
+        if not (audio_path and text_path and codes_path):
+            return False
+        return os.path.exists(audio_path) and os.path.exists(text_path) and os.path.exists(codes_path)
+
+    def _vieneu_refresh_voice_samples(self):
+        """Refresh voice samples from disk (including cloned voices)."""
+        sample_dir = os.path.join(VIENEU_TTS_DIR, "sample")
+        if not os.path.isdir(sample_dir):
+            return
+
+        for wav_path in glob.glob(os.path.join(sample_dir, "*.wav")):
+            voice_name = os.path.splitext(os.path.basename(wav_path))[0]
+            text_path = os.path.join(sample_dir, f"{voice_name}.txt")
+            codes_path = os.path.join(sample_dir, f"{voice_name}.pt")
+
+            if not (os.path.exists(text_path) and os.path.exists(codes_path)):
+                continue
+
+            voice_entry = {
+                "audio": wav_path,
+                "text": text_path,
+                "codes": codes_path,
+                "gender": VIENEU_VOICE_SAMPLES.get(voice_name, {}).get("gender", "Custom"),
+                "accent": VIENEU_VOICE_SAMPLES.get(voice_name, {}).get("accent", "Custom"),
+            }
+
+            # Update or add voice entry
+            with self.vieneu_voice_lock:
+                VIENEU_VOICE_SAMPLES[voice_name] = voice_entry
+
     def _vieneu_populate_voice_list(self):
         """Populate the voice list based on selected backbone"""
+        self._vieneu_refresh_voice_samples()
         # Clear existing
         for widget in self.vieneu_voice_list.winfo_children():
             widget.destroy()
         
         backbone = self.vieneu_backbone_var.get()
-        
-        # GGUF models only support 4 voices
+
+        with self.vieneu_voice_lock:
+            voice_valid_map = {v: self._vieneu_voice_files_exist(v) for v in VIENEU_VOICE_SAMPLES.keys()}
+
+        valid_voices = [v for v, ok in voice_valid_map.items() if ok]
+        available_custom = [v for v in valid_voices if v not in VIENEU_GGUF_ALLOWED_VOICES]
+
+        # GGUF models: keep default allowed voices, but still show any valid custom clones
         if "gguf" in backbone.lower():
-            available_voices = [v for v in VIENEU_GGUF_ALLOWED_VOICES if v in VIENEU_VOICE_SAMPLES]
+            base_voices = [v for v in VIENEU_GGUF_ALLOWED_VOICES if v in valid_voices]
+            available_voices = base_voices + sorted(available_custom)
         else:
-            available_voices = list(VIENEU_VOICE_SAMPLES.keys())
+            available_voices = valid_voices
+
+        if available_voices and self.vieneu_selected_voice.get() not in available_voices:
+            self.vieneu_selected_voice.set(available_voices[0])
         
         for voice_name in available_voices:
             voice_info = VIENEU_VOICE_SAMPLES.get(voice_name, {})
@@ -4202,12 +4307,20 @@ class StudioGUI(ctk.CTk):
 
     def _vieneu_load_model(self):
         """Load VN TTS model"""
+        if self.vieneu_loading_thread and self.vieneu_loading_thread.is_alive():
+            self._vieneu_log("⚠️ Model đang được tải, vui lòng chờ...")
+            return
+
         self._vieneu_progress_log(5, "Bắt đầu tải")
         self.btn_vieneu_load.configure(state="disabled")
         self.vieneu_model_status.configure(text="⏳ VN TTS đang tải...", text_color="#fbbf24")
         
         def load_thread():
             try:
+                with self.vieneu_fallback_lock:
+                    self.vieneu_standard_fallback = None
+                    self._vieneu_fallback_cls = None
+
                 backbone_name = self.vieneu_backbone_var.get()
                 codec_name = self.vieneu_codec_var.get()
                 device = self.vieneu_device_var.get()
@@ -4291,6 +4404,12 @@ class StudioGUI(ctk.CTk):
                 
                 device_display = backbone_device.upper()
                 self._vieneu_progress_log(45, f"Đang sử dụng {device_display}")
+
+                # Persist selection for fallback/backend reuse
+                self.vieneu_backbone_repo = backbone_repo
+                self.vieneu_codec_repo = codec_repo
+                self.vieneu_backbone_device = backbone_device
+                self.vieneu_codec_device = codec_device
                 
                 # Check if we should use FastVieNeuTTS (LMDeploy)
                 use_fast = (
@@ -4378,7 +4497,8 @@ class StudioGUI(ctk.CTk):
                 else:
                     self._vieneu_progress_log(0, "Chưa hoàn thành")
         
-        threading.Thread(target=load_thread, daemon=True).start()
+        self.vieneu_loading_thread = threading.Thread(target=load_thread, daemon=True)
+        self.vieneu_loading_thread.start()
 
     def _vieneu_encode_custom_voice(self):
         """Encode custom voice for voice cloning"""
@@ -4480,13 +4600,14 @@ class StudioGUI(ctk.CTk):
                 torch.save(ref_codes, codes_dest)
                 
                 # Add to VIENEU_VOICE_SAMPLES dictionary (runtime)
-                VIENEU_VOICE_SAMPLES[voice_name] = {
-                    "audio": audio_dest,
-                    "text": text_dest,
-                    "codes": codes_dest,
-                    "gender": "Custom",
-                    "accent": "Custom"
-                }
+                with self.vieneu_voice_lock:
+                    VIENEU_VOICE_SAMPLES[voice_name] = {
+                        "audio": audio_dest,
+                        "text": text_dest,
+                        "codes": codes_dest,
+                        "gender": "Custom",
+                        "accent": "Custom"
+                    }
                 
                 self.after(0, lambda: self._vieneu_log(f"✅ Đã lưu giọng '{voice_name}' thành công!"))
                 self.after(0, lambda: self._vieneu_log(f"📁 Vị trí: {sample_dir}"))
@@ -4601,6 +4722,7 @@ class StudioGUI(ctk.CTk):
                         self.after(0, lambda idx=chunk_idx+1, total=total_chunks: self._vieneu_log(f"⚡ Streaming đoạn {idx}/{total}..."))
                         
                         chunk_audio = []
+
                         try:
                             # Check if infer_stream method exists before calling
                             if not hasattr(self.vieneu_tts_instance, 'infer_stream'):
@@ -4609,16 +4731,32 @@ class StudioGUI(ctk.CTk):
                             for audio_chunk in self.vieneu_tts_instance.infer_stream(chunk_text, ref_codes, ref_text):
                                 if audio_chunk is not None and len(audio_chunk) > 0:
                                     chunk_audio.append(audio_chunk)
-                        except (AttributeError, NotImplementedError, Exception) as stream_err:
+                        except (AttributeError, NotImplementedError) as stream_err:
                             # Log appropriate message based on error type
-                            if isinstance(stream_err, (AttributeError, NotImplementedError)):
-                                self.after(0, lambda err=str(stream_err): self._vieneu_log(f"⚠️ Streaming không khả dụng, dùng chế độ thường"))
+                            self._vieneu_apply_fallback_stream(
+                                f"⚠️ Streaming không khả dụng, dùng chế độ thường: {stream_err}",
+                                chunk_text,
+                                ref_codes,
+                                ref_text,
+                                chunk_audio
+                            )
+                        except Exception as stream_err:
+                            if VIENEU_NO_TOKEN_ERR in str(stream_err) and self.vieneu_using_fast:
+                                self._vieneu_apply_fallback_stream(
+                                    f"⚠️ LMDeploy trả về token không hợp lệ, chuyển backend chuẩn: {stream_err}",
+                                    chunk_text,
+                                    ref_codes,
+                                    ref_text,
+                                    chunk_audio
+                                )
                             else:
-                                self.after(0, lambda err=str(stream_err): self._vieneu_log(f"⚠️ Streaming lỗi, thử non-streaming: {err}"))
-                            # Fallback to non-streaming
-                            wav = self.vieneu_tts_instance.infer(chunk_text, ref_codes, ref_text)
-                            if wav is not None and len(wav) > 0:
-                                chunk_audio = [wav]
+                                self._vieneu_apply_fallback_stream(
+                                    f"⚠️ Streaming lỗi, thử non-streaming: {stream_err}",
+                                    chunk_text,
+                                    ref_codes,
+                                    ref_text,
+                                    chunk_audio
+                                )
                         
                         # Filter out empty arrays and concatenate
                         chunk_audio = [arr for arr in chunk_audio if arr is not None and len(arr) > 0]
@@ -4643,7 +4781,7 @@ class StudioGUI(ctk.CTk):
                         
                         # TextChunk has .text attribute
                         chunk_text = chunk.text if hasattr(chunk, 'text') else str(chunk)
-                        wav = self.vieneu_tts_instance.infer(chunk_text, ref_codes, ref_text)
+                        wav = self._vieneu_safe_infer(chunk_text, ref_codes, ref_text)
                         
                         if wav is not None and len(wav) > 0:
                             all_audio.append(wav)
@@ -4854,7 +4992,7 @@ class StudioGUI(ctk.CTk):
                             chunk_text = str(chunk_item)
                         
                         try:
-                            wav = self.vieneu_tts_instance.infer(chunk_text, ref_codes, ref_text)
+                            wav = self._vieneu_safe_infer(chunk_text, ref_codes, ref_text)
                             
                             if wav is not None and len(wav) > 0:
                                 # Save chunk
