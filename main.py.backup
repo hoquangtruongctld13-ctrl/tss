@@ -5,10 +5,8 @@ import wave
 import asyncio
 import threading
 import tkinter as tk  
-from tkinter import filedialog, messagebox, ttk as tkttk
-import ttkbootstrap as ttk
-from ttkbootstrap.constants import *
-from ttkbootstrap.scrolled import ScrolledFrame, ScrolledText
+from tkinter import filedialog, messagebox
+import customtkinter as ctk 
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
@@ -42,7 +40,9 @@ if _edge_module_path not in sys.path:
 # Import authentication module
 from auth_module import AuthManager, require_login
 
-# Modern UI with ttkbootstrap - no need to set theme here, it's set in Window init
+# Cấu hình giao diện CustomTkinter
+ctk.set_appearance_mode("Dark")  # Modes: "System" (standard), "Dark", "Light"
+ctk.set_default_color_theme("blue")  # Themes: "blue" (standard), "green", "dark-blue"
 
 try:
     import pyaudio
@@ -237,9 +237,7 @@ EDGE_TTS_GENDERS = ["Tất cả", "Male", "Female"]
 # VN TTS CONFIGURATION (Vietnamese Text-to-Speech)
 # =============================================================================
 
-# IMPORTANT: VieNeu-TTS directory is located in the SAME FOLDER as main.py
-# Do NOT confuse this with other TTS directories!
-# Full path will be: <application_directory>/VieNeu-TTS/
+# VN TTS directory path (relative to main.py)
 VIENEU_TTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VieNeu-TTS")
 
 # Model backbone configurations
@@ -2478,19 +2476,17 @@ class LongTextProcessor:
 # GUI APPLICATION
 # =============================================================================
 
-class StudioGUI(ttk.Window):
-    """Modern TTS Studio with ttkbootstrap - cleaner, more organized interface"""
+class StudioGUI(ctk.CTk):
     SANITIZED_ERROR_FALLBACK = os.getenv("VN_TTS_ERROR_FALLBACK", "Đã xảy ra lỗi không xác định")
     SANITIZE_URL_PATTERN = re.compile(r"(https?://\S+|github\.com/\S*)")
 
     def __init__(self):
-        # Initialize with modern darkly theme (Bootstrap-style dark theme)
-        super().__init__(themename="darkly")
+        super().__init__()
 
         # Window Setup
-        self.title("VN TTS Studio - Modern Interface")
+        self.title("AIOLuancher TTS")
         
-        # Set window size and center it properly
+        # FIX: Set window size and center it properly to prevent jumping/lag
         window_width = 1400
         window_height = 900
         
@@ -2505,6 +2501,10 @@ class StudioGUI(ttk.Window):
         # Set geometry with position
         self.geometry(f"{window_width}x{window_height}+{x}+{y}")
         self.minsize(1200, 800)
+        
+        # Grid layout
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
         # Data & Logic Init
         self.subtitles: List[Subtitle] = []
