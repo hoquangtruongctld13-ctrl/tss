@@ -3650,6 +3650,7 @@ class StudioGUI(ctk.CTk):
         self.vieneu_custom_ref_text = ""
         self.vieneu_standard_fallback = None
         self.vieneu_fallback_lock = threading.Lock()
+        self._vieneu_fallback_cls = None
         self.vieneu_loading_thread = None
         self.vieneu_backbone_repo = None
         self.vieneu_codec_repo = None
@@ -4063,7 +4064,11 @@ class StudioGUI(ctk.CTk):
             if self.vieneu_standard_fallback is not None:
                 return self.vieneu_standard_fallback
 
-            from vieneu_tts import VieNeuTTS
+            if self._vieneu_fallback_cls is None:
+                from vieneu_tts import VieNeuTTS
+                self._vieneu_fallback_cls = VieNeuTTS
+
+            VieNeuTTSCls = self._vieneu_fallback_cls
 
             backbone_repo = self.vieneu_backbone_repo or "pnnbao-ump/VieNeu-TTS-q4-gguf"
             codec_repo = self.vieneu_codec_repo or "neuphonic/neucodec"
@@ -4071,7 +4076,7 @@ class StudioGUI(ctk.CTk):
             codec_device = (self.vieneu_codec_device or "cpu")
 
             self.after(0, lambda: self._vieneu_log("🔁 Đang chuyển sang backend chuẩn để tiếp tục sinh giọng..."))
-            self.vieneu_standard_fallback = VieNeuTTS(
+            self.vieneu_standard_fallback = VieNeuTTSCls(
                 backbone_repo=backbone_repo,
                 backbone_device=backbone_device,
                 codec_repo=codec_repo,
@@ -4713,7 +4718,7 @@ class StudioGUI(ctk.CTk):
                                     chunk_audio.append(audio_chunk)
                         except (AttributeError, NotImplementedError) as stream_err:
                             # Log appropriate message based on error type
-                            self.after(0, lambda err=str(stream_err): self._vieneu_log(f"⚠️ Streaming không khả dụng, dùng chế độ thường"))
+                            self.after(0, lambda err=str(stream_err): self._vieneu_log(f"⚠️ Streaming không khả dụng, dùng chế độ thường: {err}"))
                             # Fallback to non-streaming
                             wav = self._vieneu_safe_infer(chunk_text, ref_codes, ref_text)
                             if wav is not None and len(wav) > 0:
