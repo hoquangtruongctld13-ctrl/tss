@@ -365,6 +365,7 @@ VIENEU_GGUF_ALLOWED_VOICES = [
 VIENEU_MAX_CHARS_PER_CHUNK = 256
 VIENEU_DEFAULT_DEVICE = "Auto"  # Auto, CPU, CUDA
 VIENEU_SAMPLE_RATE = 24000
+VIENEU_NO_TOKEN_ERR = "No valid speech tokens"
 
 # Enhanced Retry settings
 MAX_RETRIES = 5  # Tăng số lần retry
@@ -4083,7 +4084,7 @@ class StudioGUI(ctk.CTk):
         try:
             return self.vieneu_tts_instance.infer(text, ref_codes, ref_text)
         except ValueError as ve:
-            if "No valid speech tokens" in str(ve) and self.vieneu_using_fast:
+            if VIENEU_NO_TOKEN_ERR in str(ve) and self.vieneu_using_fast:
                 self.after(0, lambda: self._vieneu_log("⚠️ LMDeploy không sinh token hợp lệ, chuyển sang backend chuẩn..."))
                 fallback = self._vieneu_get_fallback_tts()
                 return fallback.infer(text, ref_codes, ref_text)
@@ -4128,11 +4129,11 @@ class StudioGUI(ctk.CTk):
         audio_path = voice_info.get("audio", "")
         text_path = voice_info.get("text", "")
         codes_path = voice_info.get("codes", "")
-        return (
-            bool(audio_path and os.path.exists(audio_path))
-            and bool(text_path and os.path.exists(text_path))
-            and bool(codes_path and os.path.exists(codes_path))
-        )
+        return all([
+            audio_path and os.path.exists(audio_path),
+            text_path and os.path.exists(text_path),
+            codes_path and os.path.exists(codes_path),
+        ])
 
     def _vieneu_refresh_voice_samples(self):
         """Refresh voice samples from disk (including cloned voices)."""
@@ -4718,8 +4719,8 @@ class StudioGUI(ctk.CTk):
                             if wav is not None and len(wav) > 0:
                                 chunk_audio = [wav]
                         except Exception as stream_err:
-                            if "No valid speech tokens" in str(stream_err) and self.vieneu_using_fast:
-                                self.after(0, lambda err=str(stream_err): self._vieneu_log(f"⚠️ LMDeploy trả về token không hợp lệ, chuyển backend chuẩn"))
+                            if VIENEU_NO_TOKEN_ERR in str(stream_err) and self.vieneu_using_fast:
+                                self.after(0, lambda err=str(stream_err): self._vieneu_log(f"⚠️ LMDeploy trả về token không hợp lệ, chuyển backend chuẩn: {err}"))
                             else:
                                 self.after(0, lambda err=str(stream_err): self._vieneu_log(f"⚠️ Streaming lỗi, thử non-streaming: {err}"))
                             wav = self._vieneu_safe_infer(chunk_text, ref_codes, ref_text)
