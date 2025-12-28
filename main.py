@@ -3648,9 +3648,13 @@ class StudioGUI(ctk.CTk):
         self.vieneu_processing = False
         self.vieneu_custom_ref_audio = None
         self.vieneu_custom_ref_text = ""
+
+        # Fallback backend cache/state
         self.vieneu_standard_fallback = None
         self.vieneu_fallback_lock = threading.Lock()
         self._vieneu_fallback_cls = None
+
+        # Background loading + current config metadata
         self.vieneu_loading_thread = None
         self.vieneu_backbone_repo = None
         self.vieneu_codec_repo = None
@@ -4134,11 +4138,7 @@ class StudioGUI(ctk.CTk):
         audio_path = voice_info.get("audio", "")
         text_path = voice_info.get("text", "")
         codes_path = voice_info.get("codes", "")
-        return all([
-            audio_path and os.path.exists(audio_path),
-            text_path and os.path.exists(text_path),
-            codes_path and os.path.exists(codes_path),
-        ])
+        return all(path and os.path.exists(path) for path in (audio_path, text_path, codes_path))
 
     def _vieneu_refresh_voice_samples(self):
         """Refresh voice samples from disk (including cloned voices)."""
@@ -4173,18 +4173,16 @@ class StudioGUI(ctk.CTk):
             widget.destroy()
         
         backbone = self.vieneu_backbone_var.get()
-        
-        available_custom = [
-            v for v in VIENEU_VOICE_SAMPLES.keys() 
-            if self._vieneu_voice_files_exist(v) and v not in VIENEU_GGUF_ALLOWED_VOICES
-        ]
+
+        valid_voices = [v for v in VIENEU_VOICE_SAMPLES.keys() if self._vieneu_voice_files_exist(v)]
+        available_custom = [v for v in valid_voices if v not in VIENEU_GGUF_ALLOWED_VOICES]
 
         # GGUF models: keep default allowed voices, but still show any valid custom clones
         if "gguf" in backbone.lower():
-            base_voices = [v for v in VIENEU_GGUF_ALLOWED_VOICES if self._vieneu_voice_files_exist(v)]
+            base_voices = [v for v in VIENEU_GGUF_ALLOWED_VOICES if v in valid_voices]
             available_voices = base_voices + sorted(available_custom)
         else:
-            available_voices = [v for v in VIENEU_VOICE_SAMPLES.keys() if self._vieneu_voice_files_exist(v)]
+            available_voices = valid_voices
 
         if available_voices and self.vieneu_selected_voice.get() not in available_voices:
             self.vieneu_selected_voice.set(available_voices[0])
@@ -4307,6 +4305,7 @@ class StudioGUI(ctk.CTk):
             try:
                 with self.vieneu_fallback_lock:
                     self.vieneu_standard_fallback = None
+                    self._vieneu_fallback_cls = None
 
                 backbone_name = self.vieneu_backbone_var.get()
                 codec_name = self.vieneu_codec_var.get()
@@ -4708,6 +4707,13 @@ class StudioGUI(ctk.CTk):
                         self.after(0, lambda idx=chunk_idx+1, total=total_chunks: self._vieneu_log(f"⚡ Streaming đoạn {idx}/{total}..."))
                         
                         chunk_audio = []
+
+                        def _fallback_stream(msg: str):
+                            self.after(0, lambda m=msg: self._vieneu_log(m))
+                            wav = self._vieneu_safe_infer(chunk_text, ref_codes, ref_text)
+                            if wav is not None and len(wav) > 0:
+                                chunk_audio[:] = [wav]
+
                         try:
                             # Check if infer_stream method exists before calling
                             if not hasattr(self.vieneu_tts_instance, 'infer_stream'):
@@ -4718,19 +4724,12 @@ class StudioGUI(ctk.CTk):
                                     chunk_audio.append(audio_chunk)
                         except (AttributeError, NotImplementedError) as stream_err:
                             # Log appropriate message based on error type
-                            self.after(0, lambda err=str(stream_err): self._vieneu_log(f"⚠️ Streaming không khả dụng, dùng chế độ thường: {err}"))
-                            # Fallback to non-streaming
-                            wav = self._vieneu_safe_infer(chunk_text, ref_codes, ref_text)
-                            if wav is not None and len(wav) > 0:
-                                chunk_audio = [wav]
+                            _fallback_stream(f"⚠️ Streaming không khả dụng, dùng chế độ thường: {stream_err}")
                         except Exception as stream_err:
                             if VIENEU_NO_TOKEN_ERR in str(stream_err) and self.vieneu_using_fast:
-                                self.after(0, lambda err=str(stream_err): self._vieneu_log(f"⚠️ LMDeploy trả về token không hợp lệ, chuyển backend chuẩn: {err}"))
+                                _fallback_stream(f"⚠️ LMDeploy trả về token không hợp lệ, chuyển backend chuẩn: {stream_err}")
                             else:
-                                self.after(0, lambda err=str(stream_err): self._vieneu_log(f"⚠️ Streaming lỗi, thử non-streaming: {err}"))
-                            wav = self._vieneu_safe_infer(chunk_text, ref_codes, ref_text)
-                            if wav is not None and len(wav) > 0:
-                                chunk_audio = [wav]
+                                _fallback_stream(f"⚠️ Streaming lỗi, thử non-streaming: {stream_err}")
                         
                         # Filter out empty arrays and concatenate
                         chunk_audio = [arr for arr in chunk_audio if arr is not None and len(arr) > 0]
