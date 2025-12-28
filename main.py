@@ -5650,10 +5650,9 @@ class StudioGUI(ctk.CTk):
         - Keep only alphanumeric and Vietnamese characters
         - Limit to max_chars characters
         """
-        # Remove special characters, keep alphanumeric and Vietnamese
         import unicodedata
-        # Normalize and remove control characters
-        text = text.strip()
+        # Normalize unicode text (NFC form for Vietnamese)
+        text = unicodedata.normalize('NFC', text.strip())
         # Replace problematic characters
         invalid_chars = '<>:"/\\|?*\n\r\t'
         for char in invalid_chars:
