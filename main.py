@@ -968,6 +968,39 @@ def merge_mp3_files_ffmpeg(input_files: List[str], output_file: str, ffmpeg_path
         return False
 
 
+def create_safe_filename(text: str, max_length: int = 10) -> str:
+    """
+    Create a safe filename from text by taking first max_length characters
+    and removing invalid characters.
+    
+    Args:
+        text: The text to create filename from
+        max_length: Maximum length of the filename part (default 10)
+    
+    Returns:
+        Safe filename string
+    """
+    # Take first max_length characters
+    safe_text = text[:max_length].strip()
+    
+    # Remove invalid filename characters
+    invalid_chars = '<>:"/\\|?*'
+    for char in invalid_chars:
+        safe_text = safe_text.replace(char, '')
+    
+    # Replace spaces and newlines with underscore
+    safe_text = safe_text.replace(' ', '_').replace('\n', '_').replace('\r', '_')
+    
+    # Remove any remaining non-printable characters
+    safe_text = ''.join(c for c in safe_text if c.isprintable())
+    
+    # If empty after cleaning, use default
+    if not safe_text:
+        safe_text = "line"
+    
+    return safe_text
+
+
 def read_document_file(file_path: str) -> str:
     """
     Read content from txt, doc, or docx files.
@@ -3042,9 +3075,25 @@ class StudioGUI(ctk.CTk):
         cfg_box = ctk.CTkFrame(right_f)
         cfg_box.pack(fill="x", padx=10, pady=10)
         
-        self.lt_entry_out = ctk.CTkEntry(cfg_box, placeholder_text="Output Dir")
+        # Output directory with browse button
+        out_dir_frame = ctk.CTkFrame(cfg_box, fg_color="transparent")
+        out_dir_frame.pack(fill="x", padx=5, pady=5)
+        
+        ctk.CTkLabel(out_dir_frame, text="Output:", width=60).pack(side="left")
+        self.lt_entry_out = ctk.CTkEntry(out_dir_frame, placeholder_text="Output Dir")
         self.lt_entry_out.insert(0, "./long_text_output")
-        self.lt_entry_out.pack(fill="x", padx=5, pady=5)
+        self.lt_entry_out.pack(side="left", fill="x", expand=True, padx=(5, 5))
+        
+        ctk.CTkButton(out_dir_frame, text="📁", width=40, command=self._lt_browse_output_dir).pack(side="left")
+        
+        # Filename for direct text processing
+        filename_frame = ctk.CTkFrame(cfg_box, fg_color="transparent")
+        filename_frame.pack(fill="x", padx=5, pady=5)
+        
+        ctk.CTkLabel(filename_frame, text="Tên file:", width=60).pack(side="left")
+        self.lt_entry_filename = ctk.CTkEntry(filename_frame, placeholder_text="output (không cần .wav)")
+        self.lt_entry_filename.insert(0, "output")
+        self.lt_entry_filename.pack(side="left", fill="x", expand=True, padx=(5, 0))
         
         # FFmpeg path - use from settings
         ffmpeg_frame = ctk.CTkFrame(cfg_box, fg_color="transparent")
@@ -3087,6 +3136,10 @@ class StudioGUI(ctk.CTk):
         
         self.btn_lt_stop = ctk.CTkButton(cfg_box, text="STOP", fg_color="red", state="disabled", command=self._lt_stop)
         self.btn_lt_stop.pack(fill="x", padx=5, pady=5)
+        
+        # Preview button to play generated audio
+        self.btn_lt_preview = ctk.CTkButton(cfg_box, text="🔊 Preview Output", fg_color="#22c55e", command=self._lt_preview_output)
+        self.btn_lt_preview.pack(fill="x", padx=5, pady=5)
 
         # Log
         ctk.CTkLabel(right_f, text="Processing Log").pack()
@@ -5619,6 +5672,7 @@ class StudioGUI(ctk.CTk):
             success_count = 0
             failed_count = 0
             result_files = []
+            failed_lines = []  # Track failed lines for user to retry
             ffmpeg_path = self.ffmpeg_path if hasattr(self, 'ffmpeg_path') else get_default_ffmpeg_path()
             
             for idx, line in enumerate(lines):
@@ -5626,11 +5680,16 @@ class StudioGUI(ctk.CTk):
                     self.after(0, lambda: self._script_log_msg("⏹ Đã dừng bởi người dùng"))
                     break
                 
-                self.after(0, lambda i=idx+1, t=line[:30]: self._script_log_msg(f"📝 [{i}] Đang xử lý: {t}..."))
+                line_preview = line[:30] if len(line) > 30 else line
+                self.after(0, lambda i=idx+1, t=line_preview: self._script_log_msg(f"📝 [{i}] Đang xử lý: {t}..."))
                 
                 # Determine output file extension based on engine
                 ext = ".wav" if engine == "google" else ".mp3"
-                output_file = os.path.join(output_dir, f"{idx+1:04d}{ext}")
+                
+                # Create meaningful filename: index_first10chars.ext
+                safe_name = create_safe_filename(line, max_length=10)
+                filename = f"{idx+1:04d}_{safe_name}{ext}"
+                output_file = os.path.join(output_dir, filename)
                 
                 try:
                     if engine == "edge":
@@ -5648,11 +5707,13 @@ class StudioGUI(ctk.CTk):
                         self.after(0, lambda i=idx+1: self._script_log_msg(f"✅ [{i}] Thành công"))
                     else:
                         failed_count += 1
-                        self.after(0, lambda i=idx+1: self._script_log_msg(f"❌ [{i}] Thất bại"))
+                        failed_lines.append(f"Dòng {idx+1}: {line_preview}")
+                        self.after(0, lambda i=idx+1, t=line_preview: self._script_log_msg(f"❌ [{i}] Thất bại - Nội dung: '{t}...'"))
                         
                 except Exception as e:
                     failed_count += 1
-                    self.after(0, lambda i=idx+1, err=str(e): self._script_log_msg(f"❌ [{i}] Lỗi: {err}"))
+                    failed_lines.append(f"Dòng {idx+1}: {line_preview} - Lỗi: {str(e)[:50]}")
+                    self.after(0, lambda i=idx+1, err=str(e), t=line_preview: self._script_log_msg(f"❌ [{i}] Lỗi: {err} - Nội dung: '{t}...'"))
                 
                 # Update progress
                 progress = (idx + 1) / total
@@ -5679,6 +5740,13 @@ class StudioGUI(ctk.CTk):
             self.after(0, lambda: self._script_log_msg(f"\n{'='*40}"))
             self.after(0, lambda s=success_count, t=total, f=failed_count: 
                       self._script_log_msg(f"✅ Hoàn thành! Thành công: {s}/{t}, Thất bại: {f}"))
+            
+            # Log failed lines for user to retry
+            if failed_lines:
+                self.after(0, lambda: self._script_log_msg(f"\n⚠️ CÁC DÒNG THẤT BẠI (Có thể thử lại):"))
+                for failed_line in failed_lines:
+                    self.after(0, lambda fl=failed_line: self._script_log_msg(f"  • {fl}"))
+            
             self.after(0, lambda: self._script_log_msg(f"📁 Files đã lưu tại: {output_dir}"))
             
             # Refresh preview
@@ -5733,13 +5801,19 @@ class StudioGUI(ctk.CTk):
                     os.makedirs(file_output_dir, exist_ok=True)
                     
                     file_results = []
+                    file_failed_lines = []
                     ext = ".wav" if engine == "google" else ".mp3"
                     
                     for idx, line in enumerate(lines):
                         if not self.script_processing:
                             break
                         
-                        output_file = os.path.join(file_output_dir, f"{idx+1:04d}{ext}")
+                        # Create meaningful filename: index_first10chars.ext
+                        safe_name = create_safe_filename(line, max_length=10)
+                        filename = f"{idx+1:04d}_{safe_name}{ext}"
+                        output_file = os.path.join(file_output_dir, filename)
+                        
+                        line_preview = line[:30] if len(line) > 30 else line
                         
                         try:
                             if engine == "edge":
@@ -5753,8 +5827,11 @@ class StudioGUI(ctk.CTk):
                             
                             if success:
                                 file_results.append(output_file)
+                            else:
+                                file_failed_lines.append(f"Dòng [{idx+1}]: {line_preview}")
                         except Exception as e:
-                            self.after(0, lambda err=str(e), i=idx+1: self._script_log_msg(f"  ❌ Dòng [{i}] lỗi: {err}"))
+                            file_failed_lines.append(f"Dòng [{idx+1}]: {line_preview} - Lỗi: {str(e)[:50]}")
+                            self.after(0, lambda err=str(e), i=idx+1, t=line_preview: self._script_log_msg(f"  ❌ Dòng [{i}] lỗi: {err} - Nội dung: '{t}...'"))
                     
                     # Merge for this file if requested
                     if merge_after and file_results:
@@ -5769,6 +5846,12 @@ class StudioGUI(ctk.CTk):
                             all_output_files.append(merged_file)
                     else:
                         all_output_files.extend(file_results)
+                    
+                    # Log failed lines for this file
+                    if file_failed_lines:
+                        self.after(0, lambda f=file_name: self._script_log_msg(f"  ⚠️ File '{f}' - Các dòng thất bại:"))
+                        for failed_line in file_failed_lines:
+                            self.after(0, lambda fl=failed_line: self._script_log_msg(f"    • {fl}"))
                     
                 except Exception as e:
                     self.after(0, lambda err=str(e): self._script_log_msg(f"  ❌ Lỗi: {err}"))
@@ -7808,6 +7891,58 @@ class StudioGUI(ctk.CTk):
             self.lbl_lt_files.configure(text=f"{len(files)} files selected")
             self._lt_log(f"Selected {len(files)} files.", "INFO")
 
+    def _lt_browse_output_dir(self):
+        """Browse for output directory"""
+        dir_path = filedialog.askdirectory(title="Chọn thư mục output")
+        if dir_path:
+            self.lt_entry_out.delete(0, "end")
+            self.lt_entry_out.insert(0, dir_path)
+
+    def _lt_preview_output(self):
+        """Preview/play the generated output file"""
+        output_dir = self.lt_entry_out.get().strip()
+        if not output_dir or not os.path.isdir(output_dir):
+            messagebox.showinfo("Thông báo", "Thư mục output không tồn tại!")
+            return
+        
+        # Find wav files in output directory
+        wav_files = sorted(glob.glob(os.path.join(output_dir, "*.wav")))
+        
+        if not wav_files:
+            messagebox.showinfo("Thông báo", "Không có file audio nào trong thư mục!")
+            return
+        
+        # Create preview dialog
+        preview_win = ctk.CTkToplevel(self)
+        preview_win.title("🔊 Preview Audio Output")
+        preview_win.geometry("600x500")
+        preview_win.attributes('-topmost', True)
+        
+        ctk.CTkLabel(preview_win, text=f"📁 {output_dir}", font=("Roboto", 12), text_color="gray").pack(pady=5)
+        ctk.CTkLabel(preview_win, text=f"Tìm thấy {len(wav_files)} file audio", font=("Roboto", 14, "bold")).pack(pady=5)
+        
+        scroll_frame = ctk.CTkScrollableFrame(preview_win, fg_color="#1e293b")
+        scroll_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        for wav_file in wav_files:
+            file_name = os.path.basename(wav_file)
+            file_size = os.path.getsize(wav_file) // 1024  # KB
+            
+            row = ctk.CTkFrame(scroll_frame, fg_color="#334155")
+            row.pack(fill="x", pady=2, padx=5)
+            
+            ctk.CTkLabel(row, text=f"🎵 {file_name}", font=("Roboto", 11)).pack(side="left", padx=10, pady=8)
+            ctk.CTkLabel(row, text=f"{file_size} KB", text_color="gray", font=("Roboto", 10)).pack(side="left", padx=5)
+            
+            ctk.CTkButton(
+                row, text="▶", width=40, fg_color="#22c55e",
+                command=lambda f=wav_file: self.player.play(f)
+            ).pack(side="right", padx=5, pady=5)
+        
+        # Stop button
+        ctk.CTkButton(preview_win, text="⏹ Dừng phát", fg_color="#dc2626", 
+                     command=self.player.stop).pack(pady=10)
+
     def _lt_update_char_count(self, event=None):
         text = self.lt_txt_input.get("1.0", "end")
         count = len(text.replace(" ", "").replace("\n", ""))
@@ -7881,10 +8016,16 @@ class StudioGUI(ctk.CTk):
 
         try:
             if not is_file:
-                # Direct text - clean whitespace first
+                # Direct text - clean whitespace first and use custom filename
                 cleaned_text = clean_text_for_tts(text)
+                filename = self.lt_entry_filename.get().strip() or "output"
+                # Remove .wav extension if user added it
+                if filename.endswith('.wav'):
+                    filename = filename[:-4]
+                output_path = os.path.join(out_dir, f"{filename}.wav")
+                
                 await self.long_text_processor.process_text(
-                    cleaned_text, os.path.join(out_dir, "direct_output.wav"), 
+                    cleaned_text, output_path, 
                     chunk_size, ffmpeg_path=ffmpeg, delete_chunks=delete_chunks,
                     chunk_v2_mode=chunk_v2_enabled
                 )
