@@ -4065,13 +4065,13 @@ class StudioGUI(ctk.CTk):
 
     def _vieneu_get_fallback_tts(self):
         """Lazily create a standard backend for fallback when LMDeploy fails."""
+        if self._vieneu_fallback_cls is None:
+            from vieneu_tts import VieNeuTTS
+            self._vieneu_fallback_cls = VieNeuTTS
+
         with self.vieneu_fallback_lock:
             if self.vieneu_standard_fallback is not None:
                 return self.vieneu_standard_fallback
-
-            if self._vieneu_fallback_cls is None:
-                from vieneu_tts import VieNeuTTS
-                self._vieneu_fallback_cls = VieNeuTTS
 
             VieNeuTTSCls = self._vieneu_fallback_cls
 
@@ -4102,7 +4102,7 @@ class StudioGUI(ctk.CTk):
 
     def _vieneu_apply_fallback_stream(self, message: str, chunk_text: str, ref_codes, ref_text: str, target_list: list):
         """Log message and append fallback audio into target_list."""
-        self.after(0, lambda m=message: self._vieneu_log(m))
+        self.after(0, lambda: self._vieneu_log(message))
         wav = self._vieneu_safe_infer(chunk_text, ref_codes, ref_text)
         if wav is not None and len(wav) > 0:
             target_list[:] = [wav]
@@ -4146,7 +4146,9 @@ class StudioGUI(ctk.CTk):
         audio_path = voice_info.get("audio", "")
         text_path = voice_info.get("text", "")
         codes_path = voice_info.get("codes", "")
-        return all(path and os.path.exists(path) for path in (audio_path, text_path, codes_path))
+        if not (audio_path and text_path and codes_path):
+            return False
+        return os.path.exists(audio_path) and os.path.exists(text_path) and os.path.exists(codes_path)
 
     def _vieneu_refresh_voice_samples(self):
         """Refresh voice samples from disk (including cloned voices)."""
